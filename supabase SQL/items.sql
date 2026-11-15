@@ -1,0 +1,4 @@
+-- ========================================================================
+-- DEPRECATED: USE THE UNIFIED /supabase_setup.sql SCRIPT INSTEAD
+-- This file is kept only for historical migration purposes.
+-- ========================================================================

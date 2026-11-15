@@ -1,0 +1,281 @@
+Considering Future Node Expansion
+  You raise a very valid and strong point. Using separate tables for  canvases  and  canvas_nodes  is indeed the correct path if you plan to extend node capabilities in the future.
+
+  Here is a breakdown of why separate tables are better for your vision, followed by how we can clean up the current rough edges:
+
+  ### 1. Benefits of Separate Tables (Relational Schema)
+
+  • Cross-Canvas Search & Querying: If nodes are stored as individual database rows in a  canvas_nodes  table, you can easily query them globally. For instance, you could search for "all
+  YouTube videos saved across all my canvases" or "the most commonly used code snippets." Doing this with a JSONB document inside an  ideas  row would require complex, slow JSON path
+  queries.
+  • Node Referencing & Reuse: In a relational model, each node has a unique  UUID . This allows you to reference a node from another canvas, link ideas together, or create a true graph
+  of thoughts without duplicating data.
+  • Polymorphic Extensions: In the future, if you want nodes to support features like version history, node-specific comments, likes, or collaborative ownership, separate tables make it
+  easy to establish these foreign-key relations.
+  • Conflict-Free Real-Time Editing: If multiple users edit the same canvas concurrently (e.g. via Supabase Realtime), updating individual rows (moving Node A while someone else edits
+  Node B) is clean. With a single JSONB column, concurrent users would overwrite the entire canvas payload, leading to race conditions.
+  ──────
+  ### 2. How to Fix the "Rough Edges" in the Relational Schema
+
+  Since separate tables fit your long-term roadmap, we should keep them but address the current code quality and schema discrepancies:
+
+  1. Unify the SQL Schemas:
+      • Clean up the duplicate SQL definitions in  supabase SQL/canvas.sql  and  supabase SQL/items.sql .
+      • Update  supabase_setup.sql  to represent the single canonical database configuration.
+      • Introduce a  connections   JSONB  column directly to the  canvases  table so we don't have to hack connections into the  description  text field (e.g., no more 
+      description__CONNECTIONS__  strings).
+  2. Clean up the "Destructive Sync":
+      • Currently, updating a canvas deletes all its nodes and re-inserts them. This is slow and risky.
+      • Fix: We will implement a clean sync in server.ts. When updating a canvas, we will:
+          • Detect nodes that are no longer in the payload and delete them.
+          • Upsert (Insert or Update) the remaining nodes so existing nodes are updated in-place (preserving their database IDs and creation timestamps).
+
+  3. Field Mapping & Standardization:
+      • We will standardise the column-to-property conversion on the backend. When returning canvases and nodes, the backend will map snake_case columns ( canvas_id ,  item_id , 
+      code_snippet ,  resource_url ,  resource_title ) cleanly to camelCase properties ( canvasId ,  itemId ,  codeSnippet ,  resourceUrl ,  resourceTitle ) expected by the React
+      frontend.
+
+  ──────
+  ### Do you agree with this relational cleanup plan?
+
+  If so, we can proceed to:
+
+  1. Update  supabase_setup.sql  and remove/mark deprecated the duplicate SQL files.
+  2. Refactor the backend API endpoints in  server.ts  to implement clean upserting, correct camelCase mapping, and a dedicated  connections  column on the  canvases  table.
+  3. Apply the UX fixes to  MultiMediaCanvas.tsx  and  CreateItemModal.tsx  as outlined in the plan.
+
+────────────────────────────────────────────────────────────
+> okay so we will have 4 tables, items, canvas, canvas nodes and categories? and we will be restructuring their fields and table schema to make it production ready?
+
+▸ Thought for 5s, 1.1k tokens
+  Confirming Database Structure
+  Yes, exactly! We will have 4 tables:
+
+  1.  categories  (represents the Domains/Categories like "Computer Science" or "Design")
+  2.  ideas  (represents standard library items, ideas, and notebooks)
+  3.  canvases  (represents whiteboard spatial workspaces)
+  4.  canvas_nodes  (represents spatial cards inside a whiteboard)
+
+  Here is the proposed production-ready schema definition that unifies all files and resolves previous discrepancies:
+
+  ### 1. Table:  categories 
+
+  Stores the high-level category domains.
+
+  •  id  (UUID, Primary Key)
+  •  name  (TEXT, e.g., 'Computer Science')
+  •  description  (TEXT)
+  •  icon_color  (TEXT, maps to hex code or Tailwind class)
+  •  created_at  (TIMESTAMPTZ)
+
+  ### 2. Table:  ideas 
+
+  Stores library items, standard concept cards, and notebooks.
+
+  •  id  (UUID, Primary Key)
+  •  domain_id  (UUID, Foreign Key referencing  categories.id  ON DELETE CASCADE)
+  •  title  (TEXT)
+  •  description  (TEXT)
+  •  domain_tag  (TEXT, e.g., 'Full-Stack')
+  •  feasibility  (TEXT, e.g., 'Micro-MVP')
+  •  status  (TEXT, e.g., 'Inbox')
+  •  tech_stacks  (TEXT[], array of technology strings)
+  •  year  (TEXT, e.g., '2026')
+  •  type  (TEXT, restricts to  'item' | 'notebook' )
+  •  color  (TEXT, e.g.,  'lilac' | 'sky' | 'mint' | 'peach' )
+  •  comments  (JSONB, array of Comment objects)
+  •  notion_blocks  (JSONB, array of NotionBlock objects)
+  •  created_at  (TIMESTAMPTZ)
+
+  ### 3. Table:  canvases 
+
+  Stores the metadata for spatial whiteboard workspaces.
+
+  •  id  (UUID, Primary Key)
+  •  domain_id  (UUID, Foreign Key referencing  categories.id  ON DELETE CASCADE)
+  •  title  (TEXT, default 'New Canvas')
+  •  description  (TEXT)
+  •  domain_tag  (TEXT, default 'Architectural')
+  •  color  (TEXT, default 'sky')
+  •  zoom_scale  (DOUBLE PRECISION, default 1.0)
+  •  pan_x  (DOUBLE PRECISION, default 0.0)
+  •  pan_y  (DOUBLE PRECISION, default 0.0)
+  •  connections  (JSONB, stores node links like  [{ "from": "node-1", "to": "node-2" }] )
+  •  created_at  (TIMESTAMPTZ)
+  •  updated_at  (TIMESTAMPTZ)
+
+  ### 4. Table:  canvas_nodes 
+
+  Stores the individual spatial cards placed on a specific canvas.
+
+  •  id  (UUID, Primary Key)
+  •  canvas_id  (UUID, Foreign Key referencing  canvases.id  ON DELETE CASCADE)
+  •  type  (TEXT, restricts to  'note' | 'image' | 'video' | 'item' )
+  •  title  (TEXT)
+  •  content  (TEXT, holds text content for Notes, URL for Image/Video)
+  •  x  (DOUBLE PRECISION, position X)
+  •  y  (DOUBLE PRECISION, position Y)
+  •  width  (DOUBLE PRECISION, default 300)
+  •  height  (DOUBLE PRECISION, default 250)
+  •  item_id  (UUID, Foreign Key referencing  ideas.id  ON DELETE SET NULL - allows linking a node to a library item)
+  •  code_snippet  (TEXT)
+  •  resource_url  (TEXT)
+  •  resource_title  (TEXT)
+  •  files  (JSONB, stores lists of file attachments)
+  •  created_at  (TIMESTAMPTZ)
+  ──────
+  ### Does this schema look solid and ready to you?
+
+  Once you confirm, I will:
+
+  1. Update supabase_setup.sql with this schema and deprecate the other duplicate SQL files.
+  2. Refactor the backend API endpoints in server.ts to handle these tables, perform node upserts (instead of deleting/re-inserting everything), and clean up camelCase mapping.
+  3. Update App.tsx and canvas component states to match.
+
+────────────────────────────────────────────────────────────
+> yeah sounds just about right, also incase user wants to add images in their notion block , then? is it possible to create a subnode that can be inserted into notionpage or should we just
+  make the notion page support image/videos? the idea here is : ideas-> raw ideas that user gets in his mind,say he gets an idea by seeing a youtube video or by seeing an image, he would
+  love to log it into the system right, and the ideation document is being generated on the go to capture this very essense. whereas canvas is more of whiteboard where user can gather his
+  resources or research material or inspirations or notes etc , kinda like a whiteboard for all his thoughts across various types. now considering this as our use case , how benificial is
+  the current system overall ( including ideation document generation, which i think is a bit too automated, and what changes you recommend)
+
+▸ Thought for 1s, 1.2k tokens
+  Considering Image Integration
+  I will view  src/components/IdeationDocView.tsx  to analyze how the ideation document view renders Notion blocks and how we can support inline images/videos and organic editing.
+
+● Read(/home/shiroe/Downloads/halcyon/src/components/IdeationDocView.tsx) (ctrl+o to expand)
+
+▸ Thought for 5s, 1.2k tokens
+  Expanding Notion Block Types
+  I will view the first 150 lines of  src/components/MultiMediaCanvas.tsx  to analyze its layout, state, and interaction handling.
+
+● Read(/home/shiroe/Downloads/halcyon/src/components/MultiMediaCanvas.tsx) (ctrl+o to expand)
+
+  I will search for  onUpdateCanvas  inside  MultiMediaCanvas.tsx  to understand where and how the canvas updates are dispatched.
+
+● Search(Search onUpdateCanvas) (ctrl+o to expand)
+
+  I will view lines 200 to 250 of  MultiMediaCanvas.tsx  to understand the canvas update patterns.
+
+● Read(/home/shiroe/Downloads/halcyon/src/components/MultiMediaCanvas.tsx) (ctrl+o to expand)
+
+  I will search for  onUpdateCanvas  in  App.tsx  to see what handler is passed to  MultiMediaCanvas  and if it triggers network updates during drags.
+
+● Search(Search onUpdateCanvas in App.tsx) (ctrl+o to expand)
+
+  I will view  src/App.tsx  around line 694.
+
+● Read(/home/shiroe/Downloads/halcyon/src/App.tsx) (ctrl+o to expand)
+
+▸ Thought for 3s, 375 tokens
+  Analyzing the API Calls
+  I will search for  MouseUp  or  setDraggedNodeId  in  MultiMediaCanvas.tsx  to find where drag operations end and see if we can trigger the save there.
+
+● Search(Search MouseUp events) (ctrl+o to expand)
+
+  I will view the  handleMouseUp  function in  MultiMediaCanvas.tsx .
+
+● Read(/home/shiroe/Downloads/halcyon/src/components/MultiMediaCanvas.tsx) (ctrl+o to expand)
+
+▸ Thought for 2s, 679 tokens
+  Refining Interaction Handling
+  I will search for  onClick  or card body click handler inside  MultiMediaCanvas.tsx  to find where the click behavior is defined.
+
+● Search(Search card-body) (ctrl+o to expand)
+
+  I will search for  nodes.map  in  MultiMediaCanvas.tsx  to find the node rendering block.
+
+● Search(Search node mapping) (ctrl+o to expand)
+
+  I will view lines 820 to 950 in  MultiMediaCanvas.tsx  to analyze card rendering and click interactions.
+
+● Read(/home/shiroe/Downloads/halcyon/src/components/MultiMediaCanvas.tsx) (ctrl+o to expand)
+
+  I will search for  activeIngestNodeId  in  MultiMediaCanvas.tsx  to see what modal it triggers.
+
+● Search(Search activeIngestNodeId) (ctrl+o to expand)
+
+  I will view the modal code triggered by  activeIngestNodeId  (lines 1330 to 1420 of  MultiMediaCanvas.tsx ).
+
+● Read(/home/shiroe/Downloads/halcyon/src/components/MultiMediaCanvas.tsx) (ctrl+o to expand)
+
+  I will view lines 1421 to 1550 in  MultiMediaCanvas.tsx  to inspect the rest of the ingestion modal.
+
+● Read(/home/shiroe/Downloads/halcyon/src/components/MultiMediaCanvas.tsx) (ctrl+o to expand)
+
+  I will view lines 1551 to 1660 in  MultiMediaCanvas.tsx  to check the rest of the node selector input form.
+
+● Read(/home/shiroe/Downloads/halcyon/src/components/MultiMediaCanvas.tsx) (ctrl+o to expand)
+
+  I will view lines 1661 to 1750 in  MultiMediaCanvas.tsx  to check the Library Link tab and the Modal Save buttons.
+
+● Read(/home/shiroe/Downloads/halcyon/src/components/MultiMediaCanvas.tsx) (ctrl+o to expand)
+
+  I will view lines 1751 to 1828 in  MultiMediaCanvas.tsx  to inspect the footer buttons and how they trigger saving.
+
+● Read(/home/shiroe/Downloads/halcyon/src/components/MultiMediaCanvas.tsx) (ctrl+o to expand)
+
+  I will search for  handleSaveIngest  to see how changes from the resource editor are mapped back to the node state.
+
+● Search(Search handleSaveIngest) (ctrl+o to expand)
+
+  I will view the  handleSaveIngest  function in  MultiMediaCanvas.tsx .
+
+● Read(/home/shiroe/Downloads/halcyon/src/components/MultiMediaCanvas.tsx) (ctrl+o to expand)
+
+  I will search for  nodes  array insertion/addition handlers like  spawn  in  MultiMediaCanvas.tsx .
+
+● Search(Search spawn in canvas) (ctrl+o to expand)
+
+  I will view lines 320 to 394 of  MultiMediaCanvas.tsx  to inspect  spawnNode  and  deleteNode  functions.
+
+● Read(/home/shiroe/Downloads/halcyon/src/components/MultiMediaCanvas.tsx) (ctrl+o to expand)
+
+  I will view the beginning of  src/components/CreateItemModal.tsx  to understand the item creation form and how file uploads are handled there.
+
+● Read(/home/shiroe/Downloads/halcyon/src/components/CreateItemModal.tsx) (ctrl+o to expand)
+
+  I will search for  upload  in the  src/  folder to see how file uploads are sent to the backend.
+
+● Search(Search /api/upload in src) (ctrl+o to expand)
+
+  I will view the file upload logic in  CreateItemModal.tsx  around line 155.
+
+● Read(/home/shiroe/Downloads/halcyon/src/components/CreateItemModal.tsx) (ctrl+o to expand)
+
+  I will view lines 470 to 550 of  MultiMediaCanvas.tsx  to inspect how file uploads and drops are handled inside the multimedia canvas.
+
+● Read(/home/shiroe/Downloads/halcyon/src/components/MultiMediaCanvas.tsx) (ctrl+o to expand)
+
+▸ Thought for 4s, 612 tokens
+  Consolidating File Uploads
+  I will update  supabase_setup.sql  to define the unified production-ready 4-table schema (categories, ideas, canvases, canvas_nodes) with foreign keys, indexes, and RLS policies.
+
+  I will write the updated schema directly to  /home/shiroe/Downloads/halcyon/supabase_setup.sql .
+
+● Create(/home/shiroe/Downloads/halcyon/supabase_setup.sql) (ctrl+o to expand)
+
+  I will update  supabase SQL/canvas.sql  and  supabase SQL/items.sql  to explicitly state they are deprecated in favor of the main  supabase_setup.sql .
+
+● Create(/home/shiroe/Downloads/halcyon/supabase SQL/canvas.sql) (ctrl+o to expand)
+
+  I will now deprecate  supabase SQL/items.sql .
+
+● Create(/home/shiroe/Downloads/halcyon/supabase SQL/items.sql) (ctrl+o to expand)
+
+  I will edit  src/types.ts  to extend  NotionBlock  with support for  image  and  video  blocks.
+
+● Edit(/home/shiroe/Downloads/halcyon/src/types.ts) (ctrl+o to expand)
+
+  I will view the definition of  convertToDomainItem  and related helpers in  server.ts  to see how database rows are mapped to frontend objects.
+
+● Read(/home/shiroe/Downloads/halcyon/server.ts) (ctrl+o to expand)
+
+  I will view lines 391 to 415 of  server.ts  to see how the conversion function finishes.
+
+● Read(/home/shiroe/Downloads/halcyon/server.ts) (ctrl+o to expand)
+▸ Thought for 3s, 3.3k tokens
+  Analyzing API Interactions
+  I will view the rest of the UPDATE route in  server.ts  from line 1140 to 1248 to understand the current implementation fully.
+
+● Read(/home/shiroe/Downloads/halcyon/server.ts) (ctrl+o to expand)
